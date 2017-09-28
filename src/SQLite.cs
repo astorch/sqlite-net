@@ -35,7 +35,6 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Text;
 using System.Threading;
-
 #if USE_CSHARP_SQLITE
 using Sqlite3 = Community.CsharpSqlite.Sqlite3;
 using Sqlite3DatabaseHandle = Community.CsharpSqlite.Sqlite3.sqlite3;
@@ -157,33 +156,64 @@ namespace SQLite
 		FullTextSearch4 = 0x200
 	}
 
+	/// <summary> Provides table mappings. </summary>
 	public interface ITableMappingInfoProvider
 	{
+		/// <summary>
+		/// Returns the table mapping for the specified type.
+		/// </summary>
+		/// <param name="type">Type</param>
+		/// <returns>Table mapping</returns>
 		ITableMappingInfo GetTableMapping (Type type);
 	}
 
+	/// <summary> Describes the mapping of a table. </summary>
 	public interface ITableMappingInfo
 	{
+		/// <summary> Mapped class type </summary>
 		Type ClassType { get; }
+
+		/// <summary> Table name </summary>
 		string TableName { get; }
+
+		/// <summary> Returns TRUE if this table supports rows without id. See SQLite documentation. </summary>
 		bool WithoutRowId { get; }
-		IColumnMappingInfo[] Columns { get; }
+
+		/// <summary> Columns to map </summary>
+		ICollection<IColumnMappingInfo> Columns { get; }
 	}
 
+	/// <summary> Describes the mapping of a table column. </summary>
 	public interface IColumnMappingInfo
 	{
+		/// <summary> Column name </summary>
 		string Name { get; }
+
+		/// <summary> Associated object property </summary>
 		PropertyInfo Property { get; }
+
+		/// <summary> Collation. See SQLite documentation. </summary>
 		string Collation { get; }
+
+		/// <summary> Database column type </summary>
 		Type ColumnType { get; }
+
+		/// <summary> Returns TRUE if the column is the primary key. </summary>
 		bool IsPk { get; }
+
+		/// <summary> Returns TRUE if the column is auto-incrementing. </summary>
 		bool IsAutoInc { get; }
 
-		IndexedAttribute[] Indices { get; }
+		/// <summary> Returns the additional indices. </summary>
+		IEnumerable<IndexedAttribute> Indices { get; }
 
+		/// <summary> Returns TRUE if the column must not be NULL. </summary>
 		bool NotNull { get; }
 
+		/// <summary> Maximum string length. </summary>
 		int? MaxStringLength { get; }
+
+		/// <summary> Returns TRUE if the column data shall be stored as text (varchar). </summary>
 		bool StoreAsText { get; }
 	}
 
@@ -204,6 +234,9 @@ namespace SQLite
 
 		public Sqlite3DatabaseHandle Handle { get; private set; }
 		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
+
+		/// <summary> Table mapping info provider </summary>
+		public ITableMappingInfoProvider TableMappingInfoProvider { get; set; } = new ReflectiveTableMappingInfoProvider();
 
 		/// <summary>
 		/// Gets the database path used by this connection.
@@ -430,12 +463,14 @@ namespace SQLite
 			lock (_mappings) {
 				if (_mappings.TryGetValue (key, out map)) {
 					if (createFlags != CreateFlags.None && createFlags != map.CreateFlags) {
-						map = new TableMapping (type, createFlags);
+//						map = new TableMapping (type, createFlags);
+						map = new TableMapping(TableMappingInfoProvider.GetTableMapping(type), createFlags);
 						_mappings[key] = map;
 					}
 				}
 				else {
-					map = new TableMapping (type, createFlags);
+//					map = new TableMapping (type, createFlags);
+					map = new TableMapping (TableMappingInfoProvider.GetTableMapping (type), createFlags);
 					_mappings.Add (key, map);
 				}
 			}
@@ -2226,18 +2261,22 @@ namespace SQLite
 			TableName = mappingInfo.TableName;
 			WithoutRowId = mappingInfo.WithoutRowId;
 
-			IColumnMappingInfo[] columnMappingSet = mappingInfo.Columns;
-			Columns = new Column[columnMappingSet.Length];
-			for (int i = -1; ++i != columnMappingSet.Length;) {
-				Column col = new Column (columnMappingSet[i], createFlags);
-				Columns[i] = col;
+			ICollection<IColumnMappingInfo> columnMappingSet = mappingInfo.Columns;
+			Columns = new Column[columnMappingSet.Count];
+			int i = 0;
+			using (var itr = columnMappingSet.GetEnumerator ()) {
+				while (itr.MoveNext ()) {
+					IColumnMappingInfo colMapInf = itr.Current;
+					Column col = new Column(colMapInf, createFlags);
+					Columns[i++] = col;
 
-				if (col.IsAutoInc && col.IsPK) {
-					_autoPk = col;
-				}
+					if (col.IsAutoInc && col.IsPK) {
+						_autoPk = col;
+					}
 
-				if (col.IsPK) {
-					PK = col;
+					if (col.IsPK) {
+						PK = col;
+					}
 				}
 			}
 
@@ -2257,7 +2296,7 @@ namespace SQLite
 
 
 
-		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
+		private TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
 		{
 			MappedType = type;
 			CreateFlags = createFlags;
@@ -4275,5 +4314,150 @@ namespace SQLite
 			Null = 5
 		}
 	}
+
+	/// <summary>
+	/// Implements <see cref="ITableMappingInfoProvider"/> to provide the table mapping information 
+	/// based on object annotations and reflection calls. This mirrors the legacy mapping behaviour.
+	/// </summary>
+	public class ReflectiveTableMappingInfoProvider : ITableMappingInfoProvider
+	{
+		/// <inheritdoc />
+		public ITableMappingInfo GetTableMapping (Type type)
+		{
+			return new ReflectiveTableMappingInfo (type);
+		}
+
+		/// <summary>
+		/// Provides the table mapping by reflecting calls to the associated object type. 
+		/// This mirrors the legacy table mapping behaviour.
+		/// </summary>
+		class ReflectiveTableMappingInfo : ITableMappingInfo
+		{
+			/// <summary>
+			/// Initializes the new instance the given <paramref name="type"/>.
+			/// </summary>
+			/// <param name="type">Object type the mapping information is derived from</param>
+			public ReflectiveTableMappingInfo (Type type)
+			{
+				ClassType = type;
+
+				var typeInfo = type.GetTypeInfo ();
+				var tableAttr =
+					typeInfo.CustomAttributes
+						.Where (x => x.AttributeType == typeof (TableAttribute))
+						.Select (x => (TableAttribute)Orm.InflateAttribute (x))
+						.FirstOrDefault ();
+
+				TableName = (tableAttr != null && !string.IsNullOrEmpty (tableAttr.Name)) ? tableAttr.Name : ClassType.Name;
+				WithoutRowId = tableAttr != null ? tableAttr.WithoutRowId : false;
+
+				var props = new List<PropertyInfo> ();
+				var baseType = type;
+				var propNames = new HashSet<string> ();
+				while (baseType != typeof (object)) {
+					var ti = baseType.GetTypeInfo ();
+					var newProps = (
+						from p in ti.DeclaredProperties
+						where
+							!propNames.Contains (p.Name) &&
+							p.CanRead && p.CanWrite &&
+							(p.GetMethod != null) && (p.SetMethod != null) &&
+							(p.GetMethod.IsPublic && p.SetMethod.IsPublic) &&
+							(!p.GetMethod.IsStatic) && (!p.SetMethod.IsStatic)
+						select p).ToList ();
+					foreach (var p in newProps) {
+						propNames.Add (p.Name);
+					}
+					props.AddRange (newProps);
+					baseType = ti.BaseType;
+				}
+
+				var cols = new List<IColumnMappingInfo> ();
+				foreach (var p in props) {
+					var ignore = p.IsDefined (typeof (IgnoreAttribute), true);
+					if (ignore) continue;
+					cols.Add(new ReflectiveColumnMappingInfo(p));
+				}
+
+				Columns = cols;
+			}
+
+			/// <inheritdoc />
+			public Type ClassType { get; }
+
+			/// <inheritdoc />
+			public string TableName { get; }
+
+			/// <inheritdoc />
+			public bool WithoutRowId { get; }
+
+			/// <inheritdoc />
+			public ICollection<IColumnMappingInfo> Columns { get; }
+		}
+
+		/// <summary>
+		/// Provides the column mapping info by reflecting calls to the associated object property. 
+		/// This mirrors the legacy column mapping behaviour.
+		/// </summary>
+		class ReflectiveColumnMappingInfo : IColumnMappingInfo
+		{
+			/// <summary>
+			/// Initializes the instance for the given <paramref name="prop"/>.
+			/// </summary>
+			/// <param name="prop">Property the column informations are derived from</param>
+			public ReflectiveColumnMappingInfo (PropertyInfo prop)
+			{
+				var colAttr = prop.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
+
+				Property = prop;
+				Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
+					colAttr.ConstructorArguments[0].Value?.ToString () :
+					prop.Name;
+
+				// If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
+				ColumnType = Nullable.GetUnderlyingType (prop.PropertyType) ?? prop.PropertyType;
+				Collation = Orm.Collation (prop);
+
+				IsPk = Orm.IsPK (prop);
+				IsAutoInc = Orm.IsAutoInc (prop);
+				Indices = Orm.GetIndices (prop);
+				NotNull = Orm.IsMarkedNotNull (prop);
+				MaxStringLength = Orm.MaxStringLength (prop);
+				StoreAsText = prop.PropertyType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
+			}
+
+			/// <inheritdoc />
+			public string Name { get; }
+
+			/// <inheritdoc />
+			public PropertyInfo Property { get; }
+
+			/// <inheritdoc />
+			public string Collation { get; }
+
+			/// <inheritdoc />
+			public Type ColumnType { get; }
+
+			/// <inheritdoc />
+			public bool IsPk { get; }
+
+			/// <inheritdoc />
+			public bool IsAutoInc { get; }
+
+			/// <inheritdoc />
+			public IEnumerable<IndexedAttribute> Indices { get; }
+
+			/// <inheritdoc />
+			public bool NotNull { get; }
+
+			/// <inheritdoc />
+			public int? MaxStringLength { get; }
+
+			/// <inheritdoc />
+			public bool StoreAsText { get; }
+		}
+	}
 }
+
+
 
