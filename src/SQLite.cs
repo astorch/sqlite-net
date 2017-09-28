@@ -157,6 +157,36 @@ namespace SQLite
 		FullTextSearch4 = 0x200
 	}
 
+	public interface ITableMappingInfoProvider
+	{
+		ITableMappingInfo GetTableMapping (Type type);
+	}
+
+	public interface ITableMappingInfo
+	{
+		Type ClassType { get; }
+		string TableName { get; }
+		bool WithoutRowId { get; }
+		IColumnMappingInfo[] Columns { get; }
+	}
+
+	public interface IColumnMappingInfo
+	{
+		string Name { get; }
+		PropertyInfo Property { get; }
+		string Collation { get; }
+		Type ColumnType { get; }
+		bool IsPk { get; }
+		bool IsAutoInc { get; }
+
+		IndexedAttribute[] Indices { get; }
+
+		bool NotNull { get; }
+
+		int? MaxStringLength { get; }
+		bool StoreAsText { get; }
+	}
+
 	/// <summary>
 	/// An open connection to a SQLite database.
 	/// </summary>
@@ -2188,6 +2218,45 @@ namespace SQLite
 		readonly Column[] _insertColumns;
 		readonly Column[] _insertOrReplaceColumns;
 
+		public TableMapping (ITableMappingInfo mappingInfo, CreateFlags createFlags = CreateFlags.None)
+		{
+			MappedType = mappingInfo.ClassType;
+			CreateFlags = createFlags;
+
+			TableName = mappingInfo.TableName;
+			WithoutRowId = mappingInfo.WithoutRowId;
+
+			IColumnMappingInfo[] columnMappingSet = mappingInfo.Columns;
+			Columns = new Column[columnMappingSet.Length];
+			for (int i = -1; ++i != columnMappingSet.Length;) {
+				Column col = new Column (columnMappingSet[i], createFlags);
+				Columns[i] = col;
+
+				if (col.IsAutoInc && col.IsPK) {
+					_autoPk = col;
+				}
+
+				if (col.IsPK) {
+					PK = col;
+				}
+			}
+
+			HasAutoIncPK = _autoPk != null;
+
+			if (PK != null) {
+				GetByPrimaryKeySql = string.Format ("select * from \"{0}\" where \"{1}\" = ?", TableName, PK.Name);
+			}
+			else {
+				// People should not be calling Get/Find without a PK
+				GetByPrimaryKeySql = string.Format ("select * from \"{0}\" limit 1", TableName);
+			}
+
+			_insertColumns = Columns.Where (c => !c.IsAutoInc).ToArray ();
+			_insertOrReplaceColumns = Columns.ToArray ();
+		}
+
+
+
 		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
 		{
 			MappedType = type;
@@ -2202,7 +2271,7 @@ namespace SQLite
 
 			TableName = (tableAttr != null && !string.IsNullOrEmpty (tableAttr.Name)) ? tableAttr.Name : MappedType.Name;
 			WithoutRowId = tableAttr != null ? tableAttr.WithoutRowId : false;
-
+			//--
 			var props = new List<PropertyInfo> ();
 			var baseType = type;
 			var propNames = new HashSet<string> ();
@@ -2240,7 +2309,7 @@ namespace SQLite
 					PK = c;
 				}
 			}
-
+			// --
 			HasAutoIncPK = _autoPk != null;
 
 			if (PK != null) {
@@ -2314,6 +2383,35 @@ namespace SQLite
 			public int? MaxStringLength { get; private set; }
 
 			public bool StoreAsText { get; private set; }
+
+			public Column (IColumnMappingInfo mappingInfo, CreateFlags createFlags = CreateFlags.None)
+			{
+				PropertyInfo prop = mappingInfo.Property;
+				_prop = prop;
+
+				Name = mappingInfo.Name;
+				ColumnType = mappingInfo.ColumnType;
+				Collation = mappingInfo.Collation;
+				IsPK = mappingInfo.IsPk || (((createFlags & CreateFlags.ImplicitPK) == CreateFlags.ImplicitPK) &&
+				                            string.Compare (prop.Name, Orm.ImplicitPkName, StringComparison.OrdinalIgnoreCase) == 0);
+
+				bool isAuto = mappingInfo.IsAutoInc || (IsPK && ((createFlags & CreateFlags.AutoIncPK) == CreateFlags.AutoIncPK));
+				IsAutoGuid = isAuto && ColumnType == typeof (Guid);
+				IsAutoInc = isAuto && !IsAutoGuid;
+
+				Indices = mappingInfo.Indices;
+				if (!Indices.Any ()
+				    && !IsPK
+				    && ((createFlags & CreateFlags.ImplicitIndex) == CreateFlags.ImplicitIndex)
+				    && Name.EndsWith (Orm.ImplicitIndexSuffix, StringComparison.OrdinalIgnoreCase)
+				) {
+					Indices = new[] { new IndexedAttribute () };
+				}
+
+				IsNullable = !(IsPK || mappingInfo.NotNull);
+				MaxStringLength = mappingInfo.MaxStringLength;
+				StoreAsText = mappingInfo.StoreAsText;
+			}
 
 			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
 			{
@@ -4178,3 +4276,4 @@ namespace SQLite
 		}
 	}
 }
+
