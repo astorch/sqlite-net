@@ -175,12 +175,6 @@ namespace SQLite
 		/// <param name="databaseValue">Database value</param>
 		/// <returns>Model object</returns>
 		object FromDatabaseValue (object databaseValue);
-
-		/// <summary> Database type </summary>
-		Type DatabaseType { get; }
-
-		/// <summary> CLR type </summary>
-		Type ClrType { get; }
 	}
 
 	/// <summary> Provides table mappings. </summary>
@@ -244,23 +238,28 @@ namespace SQLite
 		bool StoreAsText { get; }
 	}
 
-	/// <summary>
-	/// An open connection to a SQLite database.
-	/// </summary>
-	[Preserve (AllMembers = true)]
-	public partial class SQLiteConnection : IDisposable
+	/// <summary> Configures a sqlite connection. </summary>
+	public class Configuration
 	{
-		private bool _open;
-		private TimeSpan _busyTimeout;
-		readonly static Dictionary<string, TableMapping> _mappings = new Dictionary<string, TableMapping> ();
-		private System.Diagnostics.Stopwatch _sw;
-		private long _elapsedMilliseconds = 0;
+		/// <summary>
+		/// Initializes the new instance.
+		/// </summary>
+		/// <param name="databasePath">Database path used by this connection.</param>
+		/// <param name="storeDateTimeAsTicks">Whether to store DateTime properties as ticks (true) or strings (false).</param>
+		public Configuration (string databasePath, bool storeDateTimeAsTicks = true)
+		{
+			DatabasePath = databasePath ?? throw new ArgumentNullException (nameof(databasePath));
+			StoreDateTimeAsTicks = storeDateTimeAsTicks;
+		}
 
-		private int _transactionDepth = 0;
-		private readonly Random _rand = new Random ();
+		/// <summary> Gets the database path used by this connection. </summary>
+		public string DatabasePath { get; }
 
-		public Sqlite3DatabaseHandle Handle { get; private set; }
-		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
+		/// <summary> Whether to store DateTime properties as ticks (true) or strings (false). </summary>
+		public bool StoreDateTimeAsTicks { get; }
+
+		/// <summary> Flags controlling how the connection should be opened. </summary>
+		public SQLiteOpenFlags OpenFlags { get; set; } = SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create;
 
 		/// <summary> Table mapping info provider </summary>
 		public ITableMappingInfoProvider TableMappingInfoProvider { get; set; } = new ReflectiveTableMappingInfoProvider();
@@ -268,37 +267,63 @@ namespace SQLite
 		/// <summary> Custom type converter </summary>
 		public Dictionary<Type, ITypeConverter> CustomTypeConverter { get; } = new Dictionary<Type, ITypeConverter> (10);
 
-		/// <summary>
-		/// Gets the database path used by this connection.
-		/// </summary>
-		public string DatabasePath { get; private set; }
-
-		/// <summary>
-		/// Gets the SQLite library version number. 3007014 would be v3.7.14
-		/// </summary>
-		public int LibVersionNumber { get; private set; }
-
-		/// <summary>
-		/// Whether Trace lines should be written that show the execution time of queries.
-		/// </summary>
-		public bool TimeExecution { get; set; }
-
-		/// <summary>
-		/// Whether to writer queries to <see cref="Tracer"/> during execution.
-		/// </summary>
-		/// <value>The tracer.</value>
+		/// <summary> Whether to writer queries to <see cref="Tracer"/> during execution. </summary>
 		public bool Trace { get; set; }
 
-		/// <summary>
-		/// The delegate responsible for writing trace lines.
-		/// </summary>
-		/// <value>The tracer.</value>
-		public Action<string> Tracer { get; set; }
+		/// <summary> The delegate responsible for writing trace lines. </summary>
+		public Action<string> Tracer { get; set; } = line => Debug.WriteLine (line);
 
-		/// <summary>
-		/// Whether to store DateTime properties as ticks (true) or strings (false).
-		/// </summary>
-		public bool StoreDateTimeAsTicks { get; private set; }
+		/// <summary> Whether Trace lines should be written that show the execution time of queries. </summary>
+		public bool TimeExecution { get; set; }
+	}
+
+	/// <summary> An open connection to a SQLite database. </summary>
+	[Preserve (AllMembers = true)]
+	public partial class SQLiteConnection : IDisposable
+	{
+		static readonly Sqlite3DatabaseHandle NullHandle = default (Sqlite3DatabaseHandle);
+		static readonly Dictionary<string, TableMapping> _mappings = new Dictionary<string, TableMapping> (50);
+		internal static Configuration Configuration;
+
+		private bool _open;
+		private TimeSpan _busyTimeout;
+		private Stopwatch _sw;
+		private long _elapsedMilliseconds = 0;
+
+		private int _transactionDepth = 0;
+		private readonly Random _rand = new Random ();
+
+		public Sqlite3DatabaseHandle Handle { get; private set; }
+
+		/// <summary> Gets the database path used by this connection. </summary>
+		public string DatabasePath { get; }
+
+		/// <summary> Gets the SQLite library version number. 3007014 would be v3.7.14 </summary>
+		public int LibVersionNumber { get; }
+
+		/// <summary> Whether Trace lines should be written that show the execution time of queries. </summary>
+		public bool TimeExecution 
+		{
+			get => Configuration.TimeExecution;
+			set => Configuration.TimeExecution = value;
+		}
+
+		/// <summary> Whether to writer queries to <see cref="Tracer"/> during execution. </summary>
+		public bool Trace 
+		{
+			get => Configuration.Trace;
+			set => Configuration.Trace = value;
+		}
+
+		/// <summary> The delegate responsible for writing trace lines. </summary>
+		public Action<string> Tracer 
+		{
+			get => Configuration.Tracer;
+			set => Configuration.Tracer = value;
+		}
+
+		/// <summary> Whether to store DateTime properties as ticks (true) or strings (false). </summary>
+		public bool StoreDateTimeAsTicks => Configuration.StoreDateTimeAsTicks;
 
 #if USE_SQLITEPCL_RAW && !NO_SQLITEPCL_RAW_BATTERIES
 		static SQLiteConnection ()
@@ -322,8 +347,9 @@ namespace SQLite
 		/// the storeDateTimeAsTicks parameter.
 		/// </param>
 		public SQLiteConnection (string databasePath, bool storeDateTimeAsTicks = true)
-			: this (databasePath, SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create, storeDateTimeAsTicks)
+			: this (new Configuration(databasePath, storeDateTimeAsTicks) {OpenFlags = SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create })
 		{
+			// Nothing to do here
 		}
 
 		/// <summary>
@@ -344,12 +370,23 @@ namespace SQLite
 		/// the storeDateTimeAsTicks parameter.
 		/// </param>
 		public SQLiteConnection (string databasePath, SQLiteOpenFlags openFlags, bool storeDateTimeAsTicks = true)
+			: this (new Configuration (databasePath, storeDateTimeAsTicks) { OpenFlags = openFlags })
 		{
-			if (databasePath==null)
-				throw new ArgumentException ("Must be specified", nameof(databasePath));
+			// Nothing to do here
+		}
 
-			DatabasePath = databasePath;
+		/// <summary>
+		/// Initializes the new connection and opens a SQLite database specified by the given <paramref name="config"/>.
+		/// </summary>
+		/// <param name="config">Connection configuration</param>
+		public SQLiteConnection (Configuration config)
+		{
+			Configuration = config ?? throw new ArgumentNullException (nameof(config));
 
+			string databasePath = config.DatabasePath;
+			SQLiteOpenFlags openFlags = config.OpenFlags;
+
+			DatabasePath = databasePath ?? throw new ArgumentException ("Must be specified", nameof(databasePath));
 			LibVersionNumber = SQLite3.LibVersionNumber ();
 
 #if NETFX_CORE
@@ -374,13 +411,10 @@ namespace SQLite
 			}
 			_open = true;
 
-			StoreDateTimeAsTicks = storeDateTimeAsTicks;
-
 			BusyTimeout = TimeSpan.FromSeconds (0.1);
 			if (openFlags.HasFlag (SQLiteOpenFlags.ReadWrite)) {
 				ExecuteScalar<string> ("PRAGMA journal_mode=WAL");
 			}
-			Tracer = line => Debug.WriteLine (line);
 		}
 
 		/// <summary>
@@ -493,14 +527,12 @@ namespace SQLite
 			lock (_mappings) {
 				if (_mappings.TryGetValue (key, out map)) {
 					if (createFlags != CreateFlags.None && createFlags != map.CreateFlags) {
-//						map = new TableMapping (type, createFlags);
-						map = new TableMapping(TableMappingInfoProvider.GetTableMapping(type), createFlags);
+						map = new TableMapping(Configuration.TableMappingInfoProvider.GetTableMapping(type), createFlags);
 						_mappings[key] = map;
 					}
 				}
 				else {
-//					map = new TableMapping (type, createFlags);
-					map = new TableMapping (TableMappingInfoProvider.GetTableMapping (type), createFlags);
+					map = new TableMapping (Configuration.TableMappingInfoProvider.GetTableMapping (type), createFlags);
 					_mappings.Add (key, map);
 				}
 			}
@@ -2454,6 +2486,8 @@ namespace SQLite
 
 			public bool StoreAsText { get; private set; }
 
+			public ITypeConverter CustomTypeConverter { get; }
+
 			public Column (IColumnMappingInfo mappingInfo, CreateFlags createFlags = CreateFlags.None)
 			{
 				PropertyInfo prop = mappingInfo.Property;
@@ -2481,6 +2515,11 @@ namespace SQLite
 				IsNullable = !(IsPK || mappingInfo.NotNull);
 				MaxStringLength = mappingInfo.MaxStringLength;
 				StoreAsText = mappingInfo.StoreAsText;
+				
+				// Check if there is a custom type converter for the column type
+				if (SQLiteConnection.Configuration.CustomTypeConverter.TryGetValue (prop.PropertyType, out ITypeConverter typeConverter)) {
+					CustomTypeConverter = typeConverter;
+				}
 			}
 
 			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
@@ -2509,7 +2548,7 @@ namespace SQLite
 					&& ((createFlags & CreateFlags.ImplicitIndex) == CreateFlags.ImplicitIndex)
 					&& Name.EndsWith (Orm.ImplicitIndexSuffix, StringComparison.OrdinalIgnoreCase)
 					) {
-					Indices = new IndexedAttribute[] { new IndexedAttribute () };
+					Indices = new[] { new IndexedAttribute () };
 				}
 				IsNullable = !(IsPK || Orm.IsMarkedNotNull (prop));
 				MaxStringLength = Orm.MaxStringLength (prop);
@@ -2519,17 +2558,39 @@ namespace SQLite
 
 			public void SetValue (object obj, object val)
 			{
-				if (val != null && ColumnType.GetTypeInfo ().IsEnum) {
-					_prop.SetValue (obj, Enum.ToObject (ColumnType, val));
+				// If there is a type converter registered, we have to use it
+				if (CustomTypeConverter != null) {
+					object originalValue = val;
+					val = CustomTypeConverter.FromDatabaseValue (originalValue);
+
+					if (SQLiteConnection.Configuration.Trace)
+						SQLiteConnection.Configuration.Tracer?.Invoke ("Converted value '" + originalValue + "' -> '" + val + "' " +
+						                                               "using " + CustomTypeConverter.GetType ());
 				}
-				else {
-					_prop.SetValue (obj, val, null);
-				}
+
+				object propertyValue = val;
+
+				if (val != null && ColumnType.GetTypeInfo ().IsEnum)
+					propertyValue = Enum.ToObject (ColumnType, val);
+
+				_prop.SetValue (obj, propertyValue, null);
 			}
 
 			public object GetValue (object obj)
 			{
-				return _prop.GetValue (obj, null);
+				object val = _prop.GetValue (obj, null);
+
+				// If there is a type converter registered, we have to use it
+				if (CustomTypeConverter != null) {
+					object originalValue = val;
+					val = CustomTypeConverter.ToDatabaseValue (originalValue);
+
+					if (SQLiteConnection.Configuration.Trace)
+						SQLiteConnection.Configuration.Tracer?.Invoke ("Converted value '" + originalValue + "' -> '" + val + "' " +
+						                                               "using " + CustomTypeConverter.GetType ());
+				}
+
+				return val;
 			}
 		}
 	}
@@ -2942,16 +3003,6 @@ namespace SQLite
 				return;
 			}
 
-			// If there is a type converter registered, we have to use it
-			if (connection.CustomTypeConverter.TryGetValue (value.GetType (), out ITypeConverter valueConverter)) {
-				object objectValue = value;
-				value = valueConverter.ToDatabaseValue (objectValue);
-
-				if (connection.Trace)
-					connection.Tracer?.Invoke ("Converted value '" + objectValue + "' -> '" + value + "' " +
-					                           "using" + valueConverter.GetType ());
-			}
-
 			if (value is int) {
 				SQLite3.BindInt (stmt, index, (int)value);
 			}
@@ -3028,13 +3079,6 @@ namespace SQLite
 		object ReadCol (Sqlite3Statement stmt, int index, SQLite3.ColType type, Type clrType)
 		{
 			if (type == SQLite3.ColType.Null) return null;
-
-			// If there is a registered type converter, we have to use it
-			if (_conn.CustomTypeConverter.TryGetValue (clrType, out ITypeConverter typeConverter)) {
-				Type dbType = typeConverter.DatabaseType;
-				object rawValue = ReadCol (stmt, index, type, dbType);
-				return typeConverter.FromDatabaseValue (rawValue);
-			}
 
 			var clrTypeInfo = clrType.GetTypeInfo ();
 
