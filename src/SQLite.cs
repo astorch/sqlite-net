@@ -2997,12 +2997,25 @@ namespace SQLite
 
 		internal static void BindParameter (Sqlite3Statement stmt, int index, object value, SQLiteConnection connection)
 		{
-			bool storeDateTimeAsTicks = connection.StoreDateTimeAsTicks;
 			if (value == null) {
 				SQLite3.BindNull (stmt, index);
 				return;
 			}
 
+			// If there is a custom type converter, we have to use it
+			// This method is also called, when a select query parameter is given. So we have to 
+			// check for a custom type converter, too.
+			if (SQLiteConnection.Configuration.CustomTypeConverter.TryGetValue (value.GetType (), out ITypeConverter typeConverter)) {
+				object originalValue = value;
+				value = typeConverter.ToDatabaseValue (originalValue);
+
+				if (SQLiteConnection.Configuration.Trace)
+					SQLiteConnection.Configuration.Tracer?.Invoke ("Converted value '" + originalValue + "' -> '" + value + "' " +
+					                                               "using " + typeConverter.GetType ());
+			}
+
+			bool storeDateTimeAsTicks = connection.StoreDateTimeAsTicks;
+			
 			if (value is int) {
 				SQLite3.BindInt (stmt, index, (int)value);
 			}
