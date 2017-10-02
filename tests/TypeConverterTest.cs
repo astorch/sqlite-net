@@ -112,6 +112,9 @@ namespace SQLite.Tests
 
 				/// <inheritdoc />
 				public bool StoreAsText { get; set; }
+
+				/// <inheritdoc />
+				public IPrimaryKeyGenerator PrimaryKeyGenerator { get; } = null;
 			}
 		}
 

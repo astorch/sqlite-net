@@ -53,6 +53,7 @@
     <Compile Include="GuidTests.cs" />
     <Compile Include="CreateTableImplicitTest.cs" />
     <Compile Include="NotNullAttributeTest.cs" />
+    <Compile Include="PrimaryKeyGeneratorTest.cs" />
     <Compile Include="SkipTest.cs" />
     <Compile Include="CollateTest.cs" />
     <Compile Include="ContainsTest.cs" />

@@ -236,6 +236,21 @@ namespace SQLite
 
 		/// <summary> Returns TRUE if the column data shall be stored as text (varchar). </summary>
 		bool StoreAsText { get; }
+
+		/// <summary> Custom primary key generator. </summary>
+		IPrimaryKeyGenerator PrimaryKeyGenerator { get; }
+	}
+
+	/// <summary> Custom primary key generator </summary>
+	public interface IPrimaryKeyGenerator
+	{
+		/// <summary>
+		/// Returns a primary key for the given CLR object.
+		/// </summary>
+		/// <param name="clrObject">CLR object to insert</param>
+		/// <param name="rowCount">Current number of rows within the target table</param>
+		/// <returns>Primary key for the CLR object</returns>
+		object GeneratePrimaryKey (object clrObject, int rowCount);
 	}
 
 	/// <summary> Configures a sqlite connection. </summary>
@@ -874,6 +889,13 @@ namespace SQLite
 			{
 				return Name;
 			}
+		}
+
+		/// <summary> Utility class to store the results of a row count query. </summary>
+		public class RowCountInfo
+		{
+			/// <summary> Count of rows </summary>
+			public int Count { get; set; }
 		}
 
 		/// <summary>
@@ -1681,7 +1703,7 @@ namespace SQLite
 		/// </returns>
 		public int Insert (object obj, Type objType)
 		{
-			return Insert (obj, "", objType);
+			return Insert (obj, string.Empty, objType);
 		}
 
 		/// <summary>
@@ -1747,16 +1769,21 @@ namespace SQLite
 		/// </returns>
 		public int Insert (object obj, string extra, Type objType)
 		{
-			if (obj == null || objType == null) {
-				return 0;
-			}
-
+			if (obj == null || objType == null) return 0;
+			
 			var map = GetMapping (objType);
 
 			if (map.PK != null && map.PK.IsAutoGuid) {
 				if (map.PK.GetValue (obj).Equals (Guid.Empty)) {
 					map.PK.SetValue (obj, Guid.NewGuid ());
 				}
+			}
+
+			if (map.PK?.PrimaryKeyGenerator != null) {
+				string query = $"select count({map.PK.Name}) as count from {map.TableName}";
+				RowCountInfo rowCountInfo = Query<RowCountInfo> (query)[0];
+				object pkValue = map.PK.PrimaryKeyGenerator.GeneratePrimaryKey (obj, rowCountInfo.Count);
+				map.PK.SetValue(obj, pkValue);
 			}
 
 			var replacing = string.Compare (extra, "OR REPLACE", StringComparison.OrdinalIgnoreCase) == 0;
@@ -2233,6 +2260,26 @@ namespace SQLite
 	{
 	}
 
+	/// <summary> Marks the column to use a custom primary key generator. </summary>
+	[AttributeUsage (AttributeTargets.Property)]
+	public class PrimaryKeyGeneratorAttribute : Attribute 
+	{
+		/// <summary>
+		/// Sets the given <paramref name="primaryKeyGeneratorType"/> as custom primary key generator.
+		/// </summary>
+		/// <param name="primaryKeyGeneratorType">Type that implements <see cref="IPrimaryKeyGenerator"/></param>
+		public PrimaryKeyGeneratorAttribute(Type primaryKeyGeneratorType)
+		{
+			PrimaryKeyGeneratorType = primaryKeyGeneratorType ?? throw new ArgumentNullException(nameof(primaryKeyGeneratorType));
+		}
+
+		/// <summary>
+		/// Type that implements <see cref="IPrimaryKeyGenerator"/> and is used as custom 
+		/// primary key generator.
+		/// </summary>
+		public Type PrimaryKeyGeneratorType { get; }
+	}
+
 	[AttributeUsage (AttributeTargets.Property)]
 	public class IndexedAttribute : Attribute
 	{
@@ -2310,19 +2357,19 @@ namespace SQLite
 
 	public class TableMapping
 	{
-		public Type MappedType { get; private set; }
+		public Type MappedType { get; }
 
-		public string TableName { get; private set; }
+		public string TableName { get; }
 
-		public bool WithoutRowId { get; private set; }
+		public bool WithoutRowId { get; }
 
-		public Column[] Columns { get; private set; }
+		public Column[] Columns { get; }
 
-		public Column PK { get; private set; }
+		public Column PK { get; }
 
-		public string GetByPrimaryKeySql { get; private set; }
+		public string GetByPrimaryKeySql { get; }
 
-		public CreateFlags CreateFlags { get; private set; }
+		public CreateFlags CreateFlags { get; }
 
 		readonly Column _autoPk;
 		readonly Column[] _insertColumns;
@@ -2473,32 +2520,35 @@ namespace SQLite
 
 		public class Column
 		{
-			PropertyInfo _prop;
+			readonly PropertyInfo _prop;
 
-			public string Name { get; private set; }
+			public string Name { get; }
 
 			public PropertyInfo PropertyInfo => _prop;
 
-			public string PropertyName { get { return _prop.Name; } }
+			public string PropertyName => _prop.Name;
 
-			public Type ColumnType { get; private set; }
+			public Type ColumnType { get; }
 
-			public string Collation { get; private set; }
+			public string Collation { get; }
 
-			public bool IsAutoInc { get; private set; }
-			public bool IsAutoGuid { get; private set; }
+			public bool IsAutoInc { get; }
 
-			public bool IsPK { get; private set; }
+			public bool IsAutoGuid { get; }
+
+			public bool IsPK { get; }
 
 			public IEnumerable<IndexedAttribute> Indices { get; set; }
 
-			public bool IsNullable { get; private set; }
+			public bool IsNullable { get; }
 
-			public int? MaxStringLength { get; private set; }
+			public int? MaxStringLength { get; }
 
-			public bool StoreAsText { get; private set; }
+			public bool StoreAsText { get; }
 
 			public ITypeConverter CustomTypeConverter { get; }
+
+			public IPrimaryKeyGenerator PrimaryKeyGenerator { get; }
 
 			public Column (IColumnMappingInfo mappingInfo, CreateFlags createFlags = CreateFlags.None)
 			{
@@ -2527,7 +2577,8 @@ namespace SQLite
 				IsNullable = !(IsPK || mappingInfo.NotNull);
 				MaxStringLength = mappingInfo.MaxStringLength;
 				StoreAsText = mappingInfo.StoreAsText;
-				
+				PrimaryKeyGenerator = mappingInfo.PrimaryKeyGenerator;
+
 				// Check if there is a custom type converter for the column type
 				if (SQLiteConnection.Configuration.CustomTypeConverter.TryGetValue (prop.PropertyType, out ITypeConverter typeConverter)) {
 					CustomTypeConverter = typeConverter;
@@ -2756,6 +2807,14 @@ namespace SQLite
 		public static bool IsAutoInc (MemberInfo p)
 		{
 			return p.CustomAttributes.Any (x => x.AttributeType == typeof (AutoIncrementAttribute));
+		}
+
+		public static IPrimaryKeyGenerator GetPrimaryKeyGenerator (PropertyInfo p)
+		{
+			var attr = p.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof(PrimaryKeyGeneratorAttribute));
+			if (attr == null) return null;
+			PrimaryKeyGeneratorAttribute pkGenAttr = (PrimaryKeyGeneratorAttribute)InflateAttribute (attr);
+			return (IPrimaryKeyGenerator) Activator.CreateInstance (pkGenAttr.PrimaryKeyGeneratorType, null);
 		}
 
 		public static FieldInfo GetField (TypeInfo t, string name)
@@ -4516,6 +4575,7 @@ namespace SQLite
 				NotNull = Orm.IsMarkedNotNull (prop);
 				MaxStringLength = Orm.MaxStringLength (prop);
 				StoreAsText = prop.PropertyType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
+				PrimaryKeyGenerator = Orm.GetPrimaryKeyGenerator (prop);
 			}
 
 			/// <inheritdoc />
@@ -4547,6 +4607,9 @@ namespace SQLite
 
 			/// <inheritdoc />
 			public bool StoreAsText { get; }
+
+			/// <inheritdoc />
+			public IPrimaryKeyGenerator PrimaryKeyGenerator { get; }
 		}
 	}
 }
