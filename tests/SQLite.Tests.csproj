@@ -82,6 +82,7 @@
     <Compile Include="TableChangedTest.cs" />
     <Compile Include="IgnoreTest.cs" />
     <Compile Include="SQLCipherTest.cs" />
+    <Compile Include="UpdateTest.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

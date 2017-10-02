@@ -85,7 +85,7 @@ namespace SQLite
 			: base (r, message)
 		{
 			if (mapping != null && obj != null) {
-				this.Columns = from c in mapping.Columns
+				Columns = from c in mapping.Columns
 							   where c.IsNullable == false && c.GetValue (obj) == null
 							   select c;
 			}
@@ -474,9 +474,9 @@ namespace SQLite
 #if !USE_SQLITEPCL_RAW
 		static byte[] GetNullTerminatedUtf8 (string s)
 		{
-			var utf8Length = System.Text.Encoding.UTF8.GetByteCount (s);
+			var utf8Length = Encoding.UTF8.GetByteCount (s);
 			var bytes = new byte [utf8Length + 1];
-			utf8Length = System.Text.Encoding.UTF8.GetBytes(s, 0, s.Length, bytes, 0);
+			utf8Length = Encoding.UTF8.GetBytes(s, 0, s.Length, bytes, 0);
 			return bytes;
 		}
 #endif
@@ -1540,7 +1540,7 @@ namespace SQLite
 		/// <returns>
 		/// The number of rows added to the table.
 		/// </returns>
-		public int InsertAll (System.Collections.IEnumerable objects, bool runInTransaction = true)
+		public int InsertAll (IEnumerable objects, bool runInTransaction = true)
 		{
 			var c = 0;
 			if (runInTransaction) {
@@ -1573,7 +1573,7 @@ namespace SQLite
 		/// <returns>
 		/// The number of rows added to the table.
 		/// </returns>
-		public int InsertAll (System.Collections.IEnumerable objects, string extra, bool runInTransaction = true)
+		public int InsertAll (IEnumerable objects, string extra, bool runInTransaction = true)
 		{
 			var c = 0;
 			if (runInTransaction) {
@@ -1606,7 +1606,7 @@ namespace SQLite
 		/// <returns>
 		/// The number of rows added to the table.
 		/// </returns>
-		public int InsertAll (System.Collections.IEnumerable objects, Type objType, bool runInTransaction = true)
+		public int InsertAll (IEnumerable objects, Type objType, bool runInTransaction = true)
 		{
 			var c = 0;
 			if (runInTransaction) {
@@ -1777,7 +1777,7 @@ namespace SQLite
 					count = insertCmd.ExecuteNonQuery (vals);
 				}
 				catch (SQLiteException ex) {
-					if (SQLite3.ExtendedErrCode (this.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+					if (SQLite3.ExtendedErrCode (Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
 						throw NotNullConstraintViolationException.New (ex.Result, ex.Message, map, obj);
 					}
 					throw;
@@ -1862,9 +1862,7 @@ namespace SQLite
 		/// </returns>
 		public int Update (object obj)
 		{
-			if (obj == null) {
-				return 0;
-			}
+			if (obj == null) return 0;
 			return Update (obj, Orm.GetType (obj));
 		}
 
@@ -1884,47 +1882,59 @@ namespace SQLite
 		/// </returns>
 		public int Update (object obj, Type objType)
 		{
+			if (obj == null) return 0;
+			return Update (obj, (string[])null);
+		}
+
+		/// <summary>
+		/// Updates the specified columns of a table using the specified object except for 
+		/// its primary key. The columns to update must explicitly set. If <paramref name="properties"/> 
+		/// is set to NULL, all columns will be updated. Otherwise, only the specified.
+		/// </summary>
+		/// <param name="obj">The object to update. It must have been mapped.</param>
+		/// <param name="properties">Set of object property names to update</param>
+		/// <returns>The number of rows updated.</returns>
+		public int Update (object obj, string[] properties)
+		{
+			if (obj == null) return 0;
+			Type objType = obj.GetType ();
+
 			int rowsAffected = 0;
-			if (obj == null || objType == null) {
-				return 0;
-			}
 
 			var map = GetMapping (objType);
-
 			var pk = map.PK;
+			if (pk == null) throw new NotSupportedException ("Cannot update " + map.TableName + ": it has no PK");
 
-			if (pk == null) {
-				throw new NotSupportedException ("Cannot update " + map.TableName + ": it has no PK");
-			}
+			// Take all columns but restrict them if the properties are explicitly named
+			IEnumerable<TableMapping.Column> columnSet = map.Columns;
+			if (properties != null)
+				columnSet = columnSet.Where (col => Array.IndexOf (properties, col.PropertyName) != -1);
 
-			var cols = from p in map.Columns
-					   where p != pk
-					   select p;
-			var vals = from c in cols
-					   select c.GetValue (obj);
+			IEnumerable<TableMapping.Column> cols = from p in columnSet where p != pk select p;
+			IEnumerable<object> vals = from c in cols select c.GetValue (obj);
+
 			var ps = new List<object> (vals);
 			if (ps.Count == 0) {
 				// There is a PK but no accompanying data,
 				// so reset the PK to make the UPDATE work.
-				cols = map.Columns;
-				vals = from c in cols
-					   select c.GetValue (obj);
+				cols = columnSet;
+				vals = from c in cols select c.GetValue (obj);
 				ps = new List<object> (vals);
 			}
 			ps.Add (pk.GetValue (obj));
 			var q = string.Format ("update \"{0}\" set {1} where {2} = ? ", map.TableName, string.Join (",", (from c in cols
-																											  select "\"" + c.Name + "\" = ? ").ToArray ()), pk.Name);
+				select "\"" + c.Name + "\" = ? ").ToArray ()), pk.Name);
 
 			try {
 				rowsAffected = Execute (q, ps.ToArray ());
 			}
 			catch (SQLiteException ex) {
 
-				if (ex.Result == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (this.Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
+				if (ex.Result == SQLite3.Result.Constraint && SQLite3.ExtendedErrCode (Handle) == SQLite3.ExtendedResult.ConstraintNotNull) {
 					throw NotNullConstraintViolationException.New (ex, map, obj);
 				}
 
-				throw ex;
+				throw;
 			}
 
 			if (rowsAffected > 0)
@@ -1932,6 +1942,8 @@ namespace SQLite
 
 			return rowsAffected;
 		}
+
+		
 
 		/// <summary>
 		/// Updates all specified objects.
@@ -1945,7 +1957,7 @@ namespace SQLite
 		/// <returns>
 		/// The number of rows modified.
 		/// </returns>
-		public int UpdateAll (System.Collections.IEnumerable objects, bool runInTransaction = true)
+		public int UpdateAll (IEnumerable objects, bool runInTransaction = true)
 		{
 			var c = 0;
 			if (runInTransaction) {
@@ -2264,7 +2276,7 @@ namespace SQLite
 		}
 	}
 
-	public sealed class PreserveAttribute : System.Attribute
+	public sealed class PreserveAttribute : Attribute
 	{
 		public bool AllMembers;
 		public bool Conditional;
@@ -3740,11 +3752,11 @@ namespace SQLite
 					//
 					// Work special magic for enumerables
 					//
-					if (val != null && val is System.Collections.IEnumerable && !(val is string) && !(val is System.Collections.Generic.IEnumerable<byte>)) {
-						var sb = new System.Text.StringBuilder ();
+					if (val != null && val is IEnumerable && !(val is string) && !(val is IEnumerable<byte>)) {
+						var sb = new StringBuilder ();
 						sb.Append ("(");
 						var head = "";
-						foreach (var a in (System.Collections.IEnumerable)val) {
+						foreach (var a in (IEnumerable)val) {
 							queryArgs.Add (a);
 							sb.Append (head);
 							sb.Append ("?");
@@ -3862,7 +3874,7 @@ namespace SQLite
 			return GenerateCommand ("*").ExecuteDeferredQuery<T> ().GetEnumerator ();
 		}
 
-		System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator ()
+		IEnumerator IEnumerable.GetEnumerator ()
 		{
 			return GetEnumerator ();
 		}
@@ -4073,7 +4085,7 @@ namespace SQLite
             byte[] queryBytes = System.Text.UTF8Encoding.UTF8.GetBytes (query);
             var r = Prepare2 (db, queryBytes, queryBytes.Length, out stmt, IntPtr.Zero);
 #else
-            var r = Prepare2 (db, query, System.Text.UTF8Encoding.UTF8.GetByteCount (query), out stmt, IntPtr.Zero);
+            var r = Prepare2 (db, query, Encoding.UTF8.GetByteCount (query), out stmt, IntPtr.Zero);
 #endif
 			if (r != Result.OK) {
 				throw SQLiteException.New (r, GetErrmsg (db));
@@ -4161,7 +4173,7 @@ namespace SQLite
 
 		public static string ColumnString (IntPtr stmt, int index)
 		{
-			return Marshal.PtrToStringUni (SQLite3.ColumnText16 (stmt, index));
+			return Marshal.PtrToStringUni (ColumnText16 (stmt, index));
 		}
 
 		public static byte[] ColumnByteArray (IntPtr stmt, int index)
